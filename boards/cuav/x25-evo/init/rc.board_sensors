@@ -49,8 +49,8 @@ then
 fi
 
 iim42652 -s -b 1 -R 2 -C 32768 start
-# iim42653 -s -b 2 -R 27 start
-# iim42653 -s -b 5 -R 12 start
+iim42653 -s -b 2 -R 27 start
+iim42653 -s -b 5 -R 12 start
 
 rm3100 -s -b 4 start
 

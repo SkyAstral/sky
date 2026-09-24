@@ -33,3 +33,4 @@
 
 add_subdirectory(bmi055)
 add_subdirectory(bmi088)
+add_subdirectory(bmi270)

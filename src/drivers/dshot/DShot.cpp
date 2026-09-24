@@ -721,6 +721,8 @@ int DShot::custom_command(int argc, char *argv[])
 		{"reverse", DShot_cmd_spin_direction_reversed, 10},
 		{"normal", DShot_cmd_spin_direction_normal, 10},
 		{"save", DShot_cmd_save_settings, 10},
+		{"reverse_am32", DShot_cmd_spin_direction_2, 10},
+		{"normal_am32", DShot_cmd_spin_direction_1, 10},
 		{"3d_on", DShot_cmd_3d_mode_on, 10},
 		{"3d_off", DShot_cmd_3d_mode_off, 10},
 		{"beep1", DShot_cmd_beacon1, 1},

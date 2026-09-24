@@ -354,3 +354,138 @@ add_custom_command(OUTPUT ${uorb_sources}
 
 add_library(uorb_msgs ${uorb_sources})
 add_dependencies(uorb_msgs prebuild_targets uorb_headers)
+
+#dds
+if(CONFIG_LIB_CDRSTREAM)
+	set(uorb_cdr_idl)
+	set(uorb_cdr_msg)
+	set(uorb_cdr_hash)
+	set(uorb_cdr_idl_uorb)
+	set(idl_include_path ${PX4_BINARY_DIR}/uORB/idl)
+	set(idl_out_path ${idl_include_path}/px4/msg)
+	set(idl_rihs01_out_path ${idl_include_path}/px4)
+	set(idl_uorb_path ${PX4_BINARY_DIR}/msg/px4/msg)
+
+	# Make sure that CycloneDDS has been checkout out
+	execute_process(COMMAND git submodule sync src/lib/cdrstream/cyclonedds
+			WORKING_DIRECTORY ${PX4_SOURCE_DIR} )
+	execute_process(COMMAND git submodule update --init --force src/lib/cdrstream/cyclonedds
+			WORKING_DIRECTORY ${PX4_SOURCE_DIR} )
+
+	# CycloneDDS-tools doesn't ship with the cdrstream-desc feature thus we've to compile idlc from source
+	MESSAGE(STATUS "Configuring idlc :" ${CMAKE_CURRENT_BINARY_DIR}/idlc)
+	file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/idlc)
+	execute_process(COMMAND ${CMAKE_COMMAND} ${PX4_SOURCE_DIR}/src/lib/cdrstream/cyclonedds
+			-DCMAKE_C_COMPILER=/usr/bin/gcc
+			-DCMAKE_C_COMPILER_LAUNCHER=ccache
+			-DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+			-DCMAKE_C_FLAGS=-Wno-maybe-uninitialized\ -Wno-unused-parameter
+			-DBUILD_EXAMPLES=OFF
+			-DENABLE_SSL=OFF
+			-DENABLE_SECURITY=OFF
+			-DBUILD_DDSPERF=OFF
+			-DENABLE_LTO=OFF
+			-DENABLE_LIFESPAN=OFF
+			-DENABLE_DEADLINE_MISSED=OFF
+			-DENABLE_NETWORK_PARTITIONS=oFF
+			-DENABLE_SOURCE_SPECIFIC_MULTICAST=oFF
+			-DENABLE_IPV6=OFF
+			-DENABLE_TYPE_DISCOVERY=OFF
+			-DENABLE_TOPIC_DISCOVERY=oFF
+			WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/idlc
+			RESULT_VARIABLE CMD_ERROR
+			OUTPUT_FILE CMD_OUTPUT )
+	MESSAGE(STATUS "Building idlc :" ${CMAKE_CURRENT_BINARY_DIR}/idlc)
+	execute_process(COMMAND ${CMAKE_COMMAND} --build . --target idlc
+			WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/idlc
+			RESULT_VARIABLE CMD_ERROR
+			OUTPUT_FILE CMD_OUTPUT )
+	list(APPEND CMAKE_PROGRAM_PATH "${CMAKE_CURRENT_BINARY_DIR}/idlc/bin")
+
+	# Copy .msg files
+	foreach(msg_file ${msg_files})
+		get_filename_component(msg ${msg_file} NAME_WE)
+		configure_file(${msg_file} ${idl_out_path}/${msg}.msg COPYONLY)
+		list(APPEND uorb_cdr_idl ${idl_out_path}/${msg}.idl)
+		list(APPEND uorb_cdr_msg ${idl_out_path}/${msg}.msg)
+		list(APPEND uorb_cdr_hash ${idl_out_path}/${msg}.json)
+		list(APPEND uorb_cdr_idl_uorb ${idl_uorb_path}/${msg}.h)
+	endforeach()
+
+	# Generate IDL from .msg using rosidl_adapter
+	# Note this a submodule inside PX4 hence no ROS2 installation required
+	add_custom_command(
+		OUTPUT ${uorb_cdr_idl}
+		COMMAND ${CMAKE_COMMAND}
+		        -E env "PYTHONPATH=${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_adapter:${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_cli"
+			${PYTHON_EXECUTABLE} ${PX4_SOURCE_DIR}/src/lib/cdrstream/msg2idl.py
+			${uorb_cdr_msg}
+		DEPENDS
+			${uorb_cdr_msg}
+			git_cyclonedds
+		COMMENT "Generating IDL from uORB topic headers"
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+		VERBATIM
+		)
+
+	file(CREATE_LINK ${idl_rihs01_out_path} ${idl_include_path}/px4_msgs SYMBOLIC)
+
+	# Generate IDL from .msg using rosidl_adapter
+	# Note this is a submodule inside PX4 hence no ROS2 installation required
+	add_custom_command(
+		OUTPUT ${uorb_cdr_hash}
+		COMMAND ${CMAKE_COMMAND}
+		        -E env "PYTHONPATH=${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_adapter:${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_cli:${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_parser:${PX4_SOURCE_DIR}/src/lib/cdrstream/rosidl/rosidl_generator_type_description"
+			${PYTHON_EXECUTABLE} ${PX4_SOURCE_DIR}/src/lib/cdrstream/idl2rihs01.py
+			--output-dir ${idl_rihs01_out_path}
+			${uorb_cdr_idl}
+		DEPENDS
+			${uorb_cdr_idl}
+			git_cyclonedds
+		COMMENT "Generating RIHS01 hashes from IDL"
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+		VERBATIM
+		)
+
+	# Generate C definitions from IDL
+	set(CYCLONEDDS_DIR ${PX4_SOURCE_DIR}/src/lib/cdrstream/cyclonedds)
+	include("${CYCLONEDDS_DIR}/cmake/Modules/Generate.cmake")
+	idlc_generate(TARGET uorb_cdrstream
+                  FEATURES "cdrstream-desc"
+                  FILES ${uorb_cdr_idl}
+                  INCLUDES ${idl_include_path}
+                  BASE_DIR ${idl_include_path}
+                  WARNINGS no-implicit-extensibility no-unsupported-annotations)
+	target_link_libraries(uorb_cdrstream INTERFACE cdr)
+
+	# Generate and overwrite IDL header with custom headers for uORB operatability
+	# We typedef the IDL struct the uORB struct so that the IDL offset calculate
+	# the offset of internal uORB struct for serialization/deserialization
+
+	# In the future we might want to turn this around let the IDL struct be the leading ABI
+	# However we need to remove the padding for logging and remove the re-ordering of fields
+
+	add_custom_target(
+		uorb_idl_header
+		COMMAND ${PYTHON_EXECUTABLE} ${PX4_SOURCE_DIR}/Tools/msg/px_generate_uorb_topic_files.py
+			--uorb-idl-header
+			-f ${msg_files}
+			-i ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/versioned
+			-o ${idl_uorb_path}
+			-e ${PX4_SOURCE_DIR}/Tools/msg/templates/cdrstream
+		DEPENDS
+			uorb_cdrstream
+			${msg_files}
+			${uorb_cdr_hash}
+			${PX4_SOURCE_DIR}/Tools/msg/templates/cdrstream/uorb_idl_header.h.em
+			${PX4_SOURCE_DIR}/Tools/msg/px_generate_uorb_topic_files.py
+			${PX4_SOURCE_DIR}/Tools/msg/px_generate_uorb_topic_helper.py
+		COMMENT "Generating uORB compatible IDL headers"
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+		VERBATIM
+	)
+	add_dependencies(uorb_msgs uorb_idl_header)
+
+	# Compile all CDR compatible message defnitions
+	target_link_libraries(uorb_msgs PRIVATE uorb_cdrstream )
+endif()
